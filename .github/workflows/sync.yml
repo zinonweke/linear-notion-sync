@@ -19,5 +19,5 @@ jobs:
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
-          LOOKBACK_MINUTES: 12
+          LOOKBACK_MINUTES: 14400
           REQUIRED_LABEL: Customer - Hapag Lloyd
