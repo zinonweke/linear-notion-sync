@@ -109,8 +109,8 @@ async function upsert(issue) {
 
   // Ensure needed select options exist
   await ensureSelectOption("Status", issue.state?.name || "");
-  if (issue.priority !== null && issue.priority !== undefined) {
-    await ensureSelectOption("Priority", String(issue.priority));
+  if (issue.priority) {
+  await ensureSelectOption("Priority", issue.priority);
   }
   await ensureSelectOption("Module", moduleVal);
   await ensureSelectOption("Sub-Area", subareaVal);
