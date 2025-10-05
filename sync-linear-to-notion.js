@@ -211,27 +211,48 @@ async function upsert(issue) {
   let action;
 
   if (page) {
-    const r = await fetch(`https://api.notion.com/v1/pages/${page.id}`, {
-      method: "PATCH",
-      headers: headersNotion,
-      body: JSON.stringify({ properties: props })
-    });
-    if (r.status === 429) { await sleep(400); return upsert(issue); }
-    pageId = page.id;
-    action = "updated";
+  // --- Update existing page ---
+  const r = await fetch(`https://api.notion.com/v1/pages/${page.id}`, {
+    method: "PATCH",
+    headers: headersNotion,
+    body: JSON.stringify({ properties: props })
+  });
+
+  // Retry if rate limited
+  if (r.status === 429) { 
+    await sleep(400); 
+    return upsert(issue); 
+  }
+
+  // ✅ SAFEGUARD: Log exact Notion error if update fails
+  if (!r.ok) {
+    const err = await r.text();
+    throw new Error(`Update page failed ${r.status}: ${err}`);
+  }
+
+  pageId = page.id;
+  action = "updated";
+
   } else {
-    const r = await fetch("https://api.notion.com/v1/pages", {
-      method: "POST",
-      headers: headersNotion,
-      body: JSON.stringify({
-        parent: { database_id: NOTION_DATABASE_ID },
-        properties: props
-      })
-    });
-    const j = await r.json();
-    if (!r.ok) throw new Error(`Create page failed: ${r.status} ${JSON.stringify(j)}`);
-    pageId = j.id;
-    action = "created";
+  // --- Create new page ---
+  const r = await fetch("https://api.notion.com/v1/pages", {
+    method: "POST",
+    headers: headersNotion,
+    body: JSON.stringify({
+      parent: { database_id: NOTION_DATABASE_ID },
+      properties: props
+    })
+  });
+
+  // ✅ SAFEGUARD: Same for creation
+  if (!r.ok) {
+    const err = await r.text();
+    throw new Error(`Create page failed ${r.status}: ${err}`);
+  }
+
+  const j = await r.json();
+  pageId = j.id;
+  action = "created";
   }
 
   if (pageId) await appendSyncComment(pageId, issue, cycleVal);
