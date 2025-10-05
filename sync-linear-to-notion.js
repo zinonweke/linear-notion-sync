@@ -31,7 +31,7 @@ function mapPriorityToText(p) {
   if (p == null) return null;
   if (typeof p === "string") return p.trim() || null;
   if (typeof p === "number") {
-    const map = { 5: "5 - High", 4: "4 - Medium", 3: "3 - Low", 2: "2 - Minor", 1: "1 - None", 0: "0" };
+    const map = { 5: "Very Low", 4: "Low", 3: "Medium", 2: "High", 1: "Urgent", 0: "None" };
     return map[p] ?? String(p);
   }
   return null;
