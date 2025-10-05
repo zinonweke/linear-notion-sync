@@ -1,33 +1,34 @@
+// sync-linear-to-notion.js
 import fetch from "node-fetch";
 import { writeFile } from "fs/promises";
 
+/* ===================== ENV ===================== */
 const {
   LINEAR_API_KEY,
   NOTION_TOKEN,
   NOTION_DATABASE_ID,
-  LOOKBACK_MINUTES = "14440",
+  LOOKBACK_MINUTES = "25", // a bit bigger than schedule to avoid gaps
   REQUIRED_LABEL = "Customer - Hapag Lloyd"
 } = process.env;
 
 if (!LINEAR_API_KEY || !NOTION_TOKEN || !NOTION_DATABASE_ID) {
-  console.error("Missing env vars");
+  console.error("Missing env vars: LINEAR_API_KEY, NOTION_TOKEN, NOTION_DATABASE_ID are required.");
   process.exit(1);
 }
 
-const headersLinear = {
-  "Content-Type": "application/json",
-  "Authorization": LINEAR_API_KEY
-};
-
-const headersNotion = {
+/* ===================== CONSTANTS ===================== */
+const NOTION_HEADERS = {
   "Authorization": `Bearer ${NOTION_TOKEN}`,
   "Notion-Version": "2022-06-28",
   "Content-Type": "application/json"
 };
-
+const LINEAR_HEADERS = {
+  "Content-Type": "application/json",
+  "Authorization": LINEAR_API_KEY // NOTE: Linear expects the key directly (no "Bearer")
+};
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-/* ===================== SUMMARY COUNTERS ===================== */
+/* ===================== SUMMARY ===================== */
 const summary = {
   processed: 0,
   created: 0,
@@ -36,32 +37,35 @@ const summary = {
   errors: 0,
   items: []
 };
-/* ============================================================ */
 
-/* ------------------ FETCH UPDATED LINEAR ISSUES ------------------ */
+/* ===================== LINEAR QUERY ===================== */
 async function* fetchUpdatedIssuesSince(isoSince) {
   let after = null;
   while (true) {
     const query = `
-      query UpdatedIssues($first:Int!, $after:String, $since: DateTime!) {
+      query UpdatedIssues($first:Int!,$after:String,$since:DateTimeOrDuration!){
         issues(
-          first: $first
-          after: $after
-          orderBy: updatedAt
-          filter: { updatedAt: { gte: $since } }
-        ) {
-          pageInfo { hasNextPage endCursor }
-          edges {
-            node {
+          first:$first
+          after:$after
+          orderBy:updatedAt
+          filter:{
+            updatedAt:{ gte:$since }
+            labels:{ some:{ name:{ eq:"${REQUIRED_LABEL}" } } }
+          }
+        ){
+          pageInfo{ hasNextPage endCursor }
+          edges{
+            node{
               id
               identifier
               title
               url
               priority
               dueDate
-              state { name }
-              labels { nodes { name } }
-              cycle { name }
+              updatedAt
+              state{ name }
+              labels{ nodes{ name } }
+              cycle{ name }
             }
           }
         }
@@ -69,56 +73,153 @@ async function* fetchUpdatedIssuesSince(isoSince) {
 
     const res = await fetch("https://api.linear.app/graphql", {
       method: "POST",
-      headers: headersLinear,
+      headers: LINEAR_HEADERS,
       body: JSON.stringify({ query, variables: { first: 50, after, since: isoSince } })
     });
+
+    if (!res.ok) {
+      const t = await res.text().catch(() => "");
+      throw new Error(`Linear GraphQL failed ${res.status}: ${t}`);
+    }
 
     const json = await res.json();
     const edges = json?.data?.issues?.edges || [];
     for (const e of edges) yield e.node;
 
     const pi = json?.data?.issues?.pageInfo;
-    if (pi?.hasNextPage) after = pi.endCursor;
-    else break;
+    if (pi?.hasNextPage) after = pi.endCursor; else break;
   }
 }
 
-/* ------------------ NOTION HELPERS ------------------ */
-let dbSchema = null;
-const getDb = async () => {
-  if (!dbSchema) {
-    const r = await fetch(`https://api.notion.com/v1/databases/${NOTION_DATABASE_ID}`, { headers: headersNotion });
-    dbSchema = await r.json();
+/* ===================== NOTION HELPERS ===================== */
+let dbSchemaCache = null;
+
+async function getDatabase() {
+  if (dbSchemaCache) return dbSchemaCache;
+  const r = await fetch(`https://api.notion.com/v1/databases/${NOTION_DATABASE_ID}`, {
+    headers: NOTION_HEADERS
+  });
+  if (!r.ok) {
+    const err = await r.text();
+    throw new Error(`Get database failed ${r.status}: ${err}`);
   }
-  return dbSchema;
-};
+  dbSchemaCache = await r.json();
+  return dbSchemaCache;
+}
+
+async function getTitlePropertyName() {
+  const db = await getDatabase();
+  const entries = Object.entries(db.properties || {});
+  for (const [name, def] of entries) {
+    if (def?.type === "title") return name; // Most workspaces use "Name", some use "Title"
+  }
+  throw new Error("No title property found on the Notion database.");
+}
 
 async function ensureSelectOption(propertyName, optionName) {
   if (!optionName) return;
-  const db = await getDb();
+  const db = await getDatabase();
   const prop = db?.properties?.[propertyName];
+  if (!prop) return; // property not found; skip silently (or you can log a warning)
+
   const typeKey = prop?.type;
-  if (!prop || (typeKey !== "select" && typeKey !== "multi_select")) return;
+  if (typeKey !== "select" && typeKey !== "multi_select") return;
 
   const existing = prop[typeKey]?.options || [];
-  if (existing.some(o => (o?.name || "").toLowerCase() === optionName.toLowerCase())) return;
+  const exists = existing.some(o => (o?.name || "").toLowerCase() === optionName.toLowerCase());
+  if (exists) return;
 
   const nextOptions = [...existing, { name: optionName }];
-  await fetch(`https://api.notion.com/v1/databases/${NOTION_DATABASE_ID}`, {
+  const r = await fetch(`https://api.notion.com/v1/databases/${NOTION_DATABASE_ID}`, {
     method: "PATCH",
-    headers: headersNotion,
-    body: JSON.stringify({ properties: { [propertyName]: { [typeKey]: { options: nextOptions } } } })
+    headers: NOTION_HEADERS,
+    body: JSON.stringify({
+      properties: {
+        [propertyName]: {
+          [typeKey]: { options: nextOptions }
+        }
+      }
+    })
   });
-  dbSchema = null;
-  await getDb();
+  if (!r.ok) {
+    const err = await r.text();
+    throw new Error(`Update DB schema (add select option "${optionName}" to "${propertyName}") failed ${r.status}: ${err}`);
+  }
+  dbSchemaCache = null; // refresh cache after schema change
+  await getDatabase();
 }
 
+async function findPageByIssueId(identifier) {
+  const r = await fetch(`https://api.notion.com/v1/databases/${NOTION_DATABASE_ID}/query`, {
+    method: "POST",
+    headers: NOTION_HEADERS,
+    body: JSON.stringify({
+      filter: { property: "Linear Issue ID", rich_text: { equals: identifier } },
+      page_size: 1
+    })
+  });
+  if (!r.ok) {
+    const err = await r.text();
+    throw new Error(`Query DB by Linear Issue ID failed ${r.status}: ${err}`);
+  }
+  const j = await r.json();
+  return j?.results?.[0];
+}
+
+async function notionWrite(endpoint, method, payload) {
+  const doFetch = async () => {
+    const r = await fetch(endpoint, {
+      method,
+      headers: NOTION_HEADERS,
+      body: JSON.stringify(payload)
+    });
+    if (r.status === 429) {
+      await sleep(500);
+      return doFetch();
+    }
+    return r;
+  };
+  const resp = await doFetch();
+  if (!resp.ok) {
+    const errTxt = await resp.text().catch(() => "");
+    throw new Error(`${method} ${endpoint} failed ${resp.status}: ${errTxt}`);
+  }
+  return resp.json();
+}
+
+/* Comment block (pretty) */
+async function appendSyncComment(pageId, issue, cycleVal) {
+  const ts = new Date().toISOString().replace("T"," ").split(".")[0] + " UTC";
+
+  const makeLine = (label, value, bold = false) => ({
+    object: "block",
+    type: "paragraph",
+    paragraph: {
+      rich_text: [
+        { type: "text", text: { content: label }, annotations: { bold } },
+        { type: "text", text: { content: value } }
+      ]
+    }
+  });
+
+  const endpoint = `https://api.notion.com/v1/blocks/${pageId}/children`;
+  await notionWrite(endpoint, "PATCH", {
+    children: [
+      makeLine("Last synced: ", `${ts}\n`, true),
+      makeLine("Linear State: ", `${issue.state?.name || "N/A"}\n`),
+      makeLine("Priority: ", `${issue.priority ?? "N/A"}\n`),
+      makeLine("Cycle: ", `${cycleVal || "N/A"}`)
+    ]
+  });
+}
+
+/* ===================== MAPPING ===================== */
 function mapExtras(labels, cycleName) {
   const MODULE_LABELS = ["Planning", "Procurement", "Post-bunkering"];
   const SUBAREA_LABELS = ["Planning", "Lab", "Approval"];
   const TYPE_LABELS = ["Features", "Bug", "Chore"];
-  const pickFirst = (cands) => labels.find(l => cands.some(c => c.toLowerCase() === l.toLowerCase()));
-
+  const pickFirst = (cands) =>
+    labels.find(l => cands.some(c => c.toLowerCase() === String(l).toLowerCase()));
   return {
     moduleVal: pickFirst(MODULE_LABELS) || "",
     subareaVal: pickFirst(SUBAREA_LABELS) || "",
@@ -127,53 +228,12 @@ function mapExtras(labels, cycleName) {
   };
 }
 
-async function findPageByIssueId(id) {
-  const resp = await fetch(`https://api.notion.com/v1/databases/${NOTION_DATABASE_ID}/query`, {
-    method: "POST",
-    headers: headersNotion,
-    body: JSON.stringify({
-      filter: { property: "Linear Issue ID", rich_text: { equals: id } },
-      page_size: 1
-    })
-  });
-  return (await resp.json())?.results?.[0];
-}
-
-/* ------------------ APPEND COMMENT TO PAGE (improved) ------------------ */
-async function appendSyncComment(pageId, issue, cycleVal) {
-  const ts = new Date().toISOString().replace("T"," ").split(".")[0] + " UTC";
-
-  const makeLine = (label, value, boldLabel = false) => ({
-    object: "block",
-    type: "paragraph",
-    paragraph: {
-      rich_text: [
-        { type: "text", text: { content: label }, annotations: { bold: boldLabel } },
-        { type: "text", text: { content: value } }
-      ]
-    }
-  });
-
-  await fetch(`https://api.notion.com/v1/blocks/${pageId}/children`, {
-    method: "PATCH",
-    headers: headersNotion,
-    body: JSON.stringify({
-      children: [
-        makeLine("Last synced: ", `${ts}\n`, true),
-        makeLine("Linear State: ", `${issue.state?.name || "N/A"}\n`),
-        makeLine("Priority: ", `${issue.priority ?? "N/A"}\n`),
-        makeLine("Cycle: ", `${cycleVal || "N/A"}`)
-      ]
-    })
-  });
-}
-
-/* ------------------ CREATE OR UPDATE PAGE ------------------ */
+/* ===================== UPSERT ===================== */
 async function upsert(issue) {
   const id = issue.identifier;
   const labels = (issue.labels?.nodes || []).map(n => n?.name || "").filter(Boolean);
 
-  // filter by required label
+  // Our Linear query already filters by REQUIRED_LABEL, but keep a guard:
   const hasRequired = labels.some(n => n.toLowerCase() === REQUIRED_LABEL.toLowerCase());
   if (!hasRequired) {
     summary.skippedNoLabel++;
@@ -181,22 +241,23 @@ async function upsert(issue) {
     return { action: "skipped" };
   }
 
+  // Map extra selects
   const { moduleVal, subareaVal, typeVal, cycleVal } = mapExtras(labels, issue.cycle?.name || "");
 
-  // Ensure select options exist
-  await ensureSelectOption("Status", issue.state?.name || "");
-  if (issue.priority) { // Priority = Select (text)
-    await ensureSelectOption("Priority", issue.priority);
-  }
-  await ensureSelectOption("Module", moduleVal);
-  await ensureSelectOption("Sub-Area", subareaVal);
-  await ensureSelectOption("Type", typeVal);
-  await ensureSelectOption("Cycle", cycleVal);
+  // Ensure select options exist (Status, Priority text, Module, etc.)
+  if (issue.state?.name) await ensureSelectOption("Status", issue.state.name);
+  if (issue.priority) await ensureSelectOption("Priority", issue.priority);
+  if (moduleVal) await ensureSelectOption("Module", moduleVal);
+  if (subareaVal) await ensureSelectOption("Sub-Area", subareaVal);
+  if (typeVal) await ensureSelectOption("Type", typeVal);
+  if (cycleVal) await ensureSelectOption("Cycle", cycleVal);
 
+  // Build properties dynamically, including the real title property name
+  const titlePropName = await getTitlePropertyName();
   const props = {
+    [titlePropName]: { title: [{ type: "text", text: { content: issue.title || "" } }] },
     "Linear Issue ID": { rich_text: [{ type: "text", text: { content: id } }] },
     "Linear URL": { url: issue.url },
-    "Title": { title: [{ type: "text", text: { content: issue.title || "" } }] },
     ...(issue.state?.name ? { "Status": { select: { name: issue.state.name } } } : {}),
     ...(issue.priority ? { "Priority": { select: { name: issue.priority } } } : {}),
     ...(issue.dueDate ? { "Due Date": { date: { start: issue.dueDate } } } : {}),
@@ -206,112 +267,98 @@ async function upsert(issue) {
     ...(cycleVal ? { "Cycle": { select: { name: cycleVal } } } : {})
   };
 
-  const page = await findPageByIssueId(id);
-  let pageId;
-  let action;
-
-  if (page) {
-  // --- Update existing page ---
-  const r = await fetch(`https://api.notion.com/v1/pages/${page.id}`, {
-    method: "PATCH",
-    headers: headersNotion,
-    body: JSON.stringify({ properties: props })
-  });
-
-  // Retry if rate limited
-  if (r.status === 429) { 
-    await sleep(400); 
-    return upsert(issue); 
+  // If you also keep a separate Text property named "Title", populate it too (optional, safe if property exists & is rich_text)
+  const db = await getDatabase();
+  if (db?.properties?.["Title"]?.type === "rich_text") {
+    props["Title"] = { rich_text: [{ type: "text", text: { content: issue.title || "" } }] };
   }
 
-  // ✅ SAFEGUARD: Log exact Notion error if update fails
-  if (!r.ok) {
-    const err = await r.text();
-    throw new Error(`Update page failed ${r.status}: ${err}`);
-  }
+  // Upsert by Linear Issue ID
+  const existing = await findPageByIssueId(id);
+  let pageId, action;
 
-  pageId = page.id;
-  action = "updated";
-
+  if (existing) {
+    // UPDATE
+    const endpoint = `https://api.notion.com/v1/pages/${existing.id}`;
+    await notionWrite(endpoint, "PATCH", { properties: props });
+    pageId = existing.id;
+    action = "updated";
   } else {
-  // --- Create new page ---
-  const r = await fetch("https://api.notion.com/v1/pages", {
-    method: "POST",
-    headers: headersNotion,
-    body: JSON.stringify({
+    // CREATE
+    const endpoint = "https://api.notion.com/v1/pages";
+    const result = await notionWrite(endpoint, "POST", {
       parent: { database_id: NOTION_DATABASE_ID },
       properties: props
-    })
-  });
-
-  // ✅ SAFEGUARD: Same for creation
-  if (!r.ok) {
-    const err = await r.text();
-    throw new Error(`Create page failed ${r.status}: ${err}`);
+    });
+    pageId = result.id;
+    action = "created";
   }
 
-  const j = await r.json();
-  pageId = j.id;
-  action = "created";
-  }
-
-  if (pageId) await appendSyncComment(pageId, issue, cycleVal);
+  // Append tiny summary comment
+  await appendSyncComment(pageId, issue, cycleVal);
 
   return { action, pageId };
 }
 
-/* ------------------ MAIN LOOP ------------------ */
+/* ===================== MAIN ===================== */
 (async () => {
-  const since = new Date(Date.now() - Number(LOOKBACK_MINUTES) * 60_000).toISOString();
+  try {
+    const sinceISO = new Date(Date.now() - Number(LOOKBACK_MINUTES) * 60_000).toISOString();
 
-  for await (const issue of fetchUpdatedIssuesSince(since)) {
-    summary.processed++;
-    try {
-      const res = await upsert(issue);
-      if (res?.action === "created") {
-        summary.created++;
-        summary.items.push(`Created: ${issue.identifier} — ${issue.title}`);
-      } else if (res?.action === "updated") {
-        summary.updated++;
-        summary.items.push(`Updated: ${issue.identifier} — ${issue.title}`);
+    for await (const issue of fetchUpdatedIssuesSince(sinceISO)) {
+      summary.processed++;
+      try {
+        const res = await upsert(issue);
+        if (res?.action === "created") {
+          summary.created++;
+          summary.items.push(`Created: ${issue.identifier} — ${issue.title}`);
+        } else if (res?.action === "updated") {
+          summary.updated++;
+          summary.items.push(`Updated: ${issue.identifier} — ${issue.title}`);
+        }
+      } catch (e) {
+        summary.errors++;
+        summary.items.push(`Error: ${issue.identifier} — ${e.message}`);
+        console.error(e);
       }
-    } catch (e) {
-      summary.errors++;
-      summary.items.push(`Error: ${issue.identifier} — ${e.message}`);
-      console.error(e);
+      await sleep(200); // polite pacing for Notion
     }
-    await sleep(200);
+
+    // Console summary
+    const line = `Summary — processed: ${summary.processed}, created: ${summary.created}, updated: ${summary.updated}, skipped(no label): ${summary.skippedNoLabel}, errors: ${summary.errors}`;
+    console.log(line);
+
+    // GitHub Step Summary
+    const summaryPath = process.env.GITHUB_STEP_SUMMARY;
+    if (summaryPath) {
+      const md = [
+        `# Linear → Notion Sync`,
+        ``,
+        `**Label filter:** \`${REQUIRED_LABEL}\``,
+        ``,
+        `| metric | count |`,
+        `|---|---:|`,
+        `| processed | ${summary.processed} |`,
+        `| created | ${summary.created} |`,
+        `| updated | ${summary.updated} |`,
+        `| skipped (no label) | ${summary.skippedNoLabel} |`,
+        `| errors | ${summary.errors} |`,
+        ``,
+        `<details><summary>Items</summary>`,
+        ``,
+        summary.items.map(x => `- ${x}`).join("\n") || "_(none)_",
+        ``,
+        `</details>`
+      ].join("\n");
+      await writeFile(summaryPath, md + "\n", { encoding: "utf8", flag: "a" });
+    }
+
+    // Uncomment this to fail the job when any error occurs:
+    // if (summary.errors > 0) process.exit(1);
+
+  } catch (fatal) {
+    // Top-level fatal (e.g., Linear auth/schema fatal)
+    console.error("FATAL:", fatal);
+    process.exit(1);
   }
-
-  const line = `Summary — processed: ${summary.processed}, created: ${summary.created}, updated: ${summary.updated}, skipped(no label): ${summary.skippedNoLabel}, errors: ${summary.errors}`;
-  console.log(line);
-
-  // Write GitHub Step Summary (fixed)
-  const summaryPath = process.env.GITHUB_STEP_SUMMARY;
-  if (summaryPath) {
-    const md = [
-      `# Linear → Notion Sync`,
-      ``,
-      `**Label filter:** \`${REQUIRED_LABEL}\``,
-      ``,
-      `| metric | count |`,
-      `|---|---:|`,
-      `| processed | ${summary.processed} |`,
-      `| created | ${summary.created} |`,
-      `| updated | ${summary.updated} |`,
-      `| skipped (no label) | ${summary.skippedNoLabel} |`,
-      `| errors | ${summary.errors} |`,
-      ``,
-      `<details><summary>Items</summary>`,
-      ``,
-      summary.items.map(x => `- ${x}`).join("\n") || "_(none)_",
-      ``,
-      `</details>`
-    ].join("\n");
-
-    await writeFile(summaryPath, md + "\n", { encoding: "utf8", flag: "a" });
-  }
-
-  // Uncomment to fail job if errors > 0
-  // if (summary.errors > 0) process.exit(1);
 })();
