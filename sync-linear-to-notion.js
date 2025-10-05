@@ -11,6 +11,32 @@ const {
   REQUIRED_LABEL = "Customer - Hapag Lloyd"
 } = process.env;
 
+// === ADD: normalization helpers ===
+function normalizeOptionName(value) {
+  if (value == null) return null;                 // null/undefined
+  if (typeof value === "string") {
+    const s = value.trim();
+    return s.length ? s : null;
+  }
+  if (typeof value === "number") return String(value);
+  if (typeof value === "object") {
+    // accept shapes like { name: "..." }
+    if (typeof value.name === "string" && value.name.trim()) return value.name.trim();
+  }
+  return null; // unknown/empty → skip
+}
+
+// Optional: map numeric Linear priority to your text labels
+function mapPriorityToText(p) {
+  if (p == null) return null;
+  if (typeof p === "string") return p.trim() || null;
+  if (typeof p === "number") {
+    const map = { 5: "5 - High", 4: "4 - Medium", 3: "3 - Low", 2: "2 - Minor", 1: "1 - None", 0: "0" };
+    return map[p] ?? String(p);
+  }
+  return null;
+}
+
 if (!LINEAR_API_KEY || !NOTION_TOKEN || !NOTION_DATABASE_ID) {
   console.error("Missing env vars: LINEAR_API_KEY, NOTION_TOKEN, NOTION_DATABASE_ID are required.");
   process.exit(1);
@@ -116,17 +142,22 @@ async function getTitlePropertyName() {
   throw new Error("No title property found on the Notion database.");
 }
 
-async function ensureSelectOption(propertyName, optionName) {
-  if (!optionName) return;
+async function ensureSelectOption(propertyName, rawOption) {
+  const optionName = normalizeOptionName(rawOption);
+  if (!optionName) return; // nothing to add
+
   const db = await getDatabase();
   const prop = db?.properties?.[propertyName];
-  if (!prop) return; // property not found; skip silently (or you can log a warning)
+  if (!prop) return; // property missing → silently skip or console.warn
 
   const typeKey = prop?.type;
   if (typeKey !== "select" && typeKey !== "multi_select") return;
 
   const existing = prop[typeKey]?.options || [];
-  const exists = existing.some(o => (o?.name || "").toLowerCase() === optionName.toLowerCase());
+  const exists = existing.some(o => {
+    const n = (o?.name ?? "").toString().toLowerCase();
+    return n === optionName.toLowerCase();
+  });
   if (exists) return;
 
   const nextOptions = [...existing, { name: optionName }];
@@ -244,27 +275,37 @@ async function upsert(issue) {
   // Map extra selects
   const { moduleVal, subareaVal, typeVal, cycleVal } = mapExtras(labels, issue.cycle?.name || "");
 
+
+  // === ADD: normalize everything going into Selects
+  const statusName  = normalizeOptionName(issue.state?.name);
+  const priorityVal = normalizeOptionName(mapPriorityToText(issue.priority)); // handles number or text
+  const moduleNorm  = normalizeOptionName(moduleVal);
+  const subareaNorm = normalizeOptionName(subareaVal);
+  const typeNorm    = normalizeOptionName(typeVal);
+  const cycleNorm   = normalizeOptionName(cycleVal);
+
   // Ensure select options exist (Status, Priority text, Module, etc.)
-  if (issue.state?.name) await ensureSelectOption("Status", issue.state.name);
-  if (issue.priority) await ensureSelectOption("Priority", issue.priority);
-  if (moduleVal) await ensureSelectOption("Module", moduleVal);
-  if (subareaVal) await ensureSelectOption("Sub-Area", subareaVal);
-  if (typeVal) await ensureSelectOption("Type", typeVal);
-  if (cycleVal) await ensureSelectOption("Cycle", cycleVal);
+  if (statusName)  await ensureSelectOption("Status",   statusName);
+  if (priorityVal) await ensureSelectOption("Priority", priorityVal);
+  if (moduleNorm)  await ensureSelectOption("Module",   moduleNorm);
+  if (subareaNorm) await ensureSelectOption("Sub-Area", subareaNorm);
+  if (typeNorm)    await ensureSelectOption("Type",     typeNorm);
+  if (cycleNorm)   await ensureSelectOption("Cycle",    cycleNorm);
 
   // Build properties dynamically, including the real title property name
   const titlePropName = await getTitlePropertyName();
+  
   const props = {
-    [titlePropName]: { title: [{ type: "text", text: { content: issue.title || "" } }] },
-    "Linear Issue ID": { rich_text: [{ type: "text", text: { content: id } }] },
-    "Linear URL": { url: issue.url },
-    ...(issue.state?.name ? { "Status": { select: { name: issue.state.name } } } : {}),
-    ...(issue.priority ? { "Priority": { select: { name: issue.priority } } } : {}),
-    ...(issue.dueDate ? { "Due Date": { date: { start: issue.dueDate } } } : {}),
-    ...(moduleVal ? { "Module": { select: { name: moduleVal } } } : {}),
-    ...(subareaVal ? { "Sub-Area": { select: { name: subareaVal } } } : {}),
-    ...(typeVal ? { "Type": { select: { name: typeVal } } } : {}),
-    ...(cycleVal ? { "Cycle": { select: { name: cycleVal } } } : {})
+  [titlePropName]: { title: [{ type: "text", text: { content: issue.title || "" } }] },
+  "Linear Issue ID": { rich_text: [{ type: "text", text: { content: id } }] },
+  "Linear URL": { url: issue.url },
+  ...(statusName  ? { "Status":   { select: { name: statusName } } } : {}),
+  ...(priorityVal ? { "Priority": { select: { name: priorityVal } } } : {}),
+  ...(issue.dueDate ? { "Due Date": { date: { start: issue.dueDate } } } : {}),
+  ...(moduleNorm  ? { "Module":   { select: { name: moduleNorm } } } : {}),
+  ...(subareaNorm ? { "Sub-Area": { select: { name: subareaNorm } } } : {}),
+  ...(typeNorm    ? { "Type":     { select: { name: typeNorm } } } : {}),
+  ...(cycleNorm   ? { "Cycle":    { select: { name: cycleNorm } } } : {})
   };
 
   // If you also keep a separate Text property named "Title", populate it too (optional, safe if property exists & is rich_text)
