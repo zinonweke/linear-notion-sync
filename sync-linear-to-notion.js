@@ -37,6 +37,25 @@ function mapPriorityToText(p) {
   return null;
 }
 
+// Return "YYYY-MM-DDTHH:mm:ss" for the given IANA time zone (no Z, no offset)
+function nowInTimeZoneLocalISO(tz = "Europe/Berlin") {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: tz,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false
+  })
+  .formatToParts(new Date())
+  .reduce((acc, p) => (acc[p.type] = p.value, acc), {});
+  // en-CA gives YYYY-MM-DD order, which is convenient
+  return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}`;
+}
+
+
 // Split long strings into Notion-safe rich_text chunks
 function toRichTextArray(str) {
   if (!str) return [];
@@ -325,7 +344,7 @@ async function upsert(issue) {
   ...(typeNorm    ? { "Type":     { select: { name: typeNorm } } } : {}),
   ...(cycleNorm   ? { "Cycle":    { select: { name: cycleNorm } } } : {}),
   "Last Sync": {
-    date: { start: nowISO(), time_zone: "Europe/Berlin" }
+  date: { start: nowInTimeZoneLocalISO("Europe/Berlin"), time_zone: "Europe/Berlin" }
   },
     "Description": {
       rich_text: toRichTextArray(issue.description || "")
@@ -365,7 +384,7 @@ async function upsert(issue) {
   // Optional: ensure 'Last Sync' always reflects the final write time
   await notionWrite(`https://api.notion.com/v1/pages/${pageId}`, "PATCH", {
     properties: {
-      "Last Sync": { date: { start: nowISO(), time_zone: "Europe/Berlin" } }
+      "Last Sync": { date: { start: nowInTimeZoneLocalISO("Europe/Berlin"), time_zone: "Europe/Berlin" } }
     }
   });
   
