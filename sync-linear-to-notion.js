@@ -37,6 +37,23 @@ function mapPriorityToText(p) {
   return null;
 }
 
+// Split long strings into Notion-safe rich_text chunks
+function toRichTextArray(str) {
+  if (!str) return [];
+  const s = String(str);
+  const MAX = 1900; // conservative chunk size
+  const chunks = [];
+  for (let i = 0; i < s.length; i += MAX) {
+    chunks.push({ type: "text", text: { content: s.slice(i, i + MAX) } });
+  }
+  return chunks;
+}
+
+// Always use current time in ISO (UTC); Notion will display using a time_zone
+function nowISO() {
+  return new Date().toISOString();
+}
+
 if (!LINEAR_API_KEY || !NOTION_TOKEN || !NOTION_DATABASE_ID) {
   console.error("Missing env vars: LINEAR_API_KEY, NOTION_TOKEN, NOTION_DATABASE_ID are required.");
   process.exit(1);
@@ -92,6 +109,7 @@ async function* fetchUpdatedIssuesSince(isoSince) {
               state{ name }
               labels{ nodes{ name } }
               cycle{ name }
+              description
             }
           }
         }
@@ -305,7 +323,13 @@ async function upsert(issue) {
   ...(moduleNorm  ? { "Module":   { select: { name: moduleNorm } } } : {}),
   ...(subareaNorm ? { "Sub-Area": { select: { name: subareaNorm } } } : {}),
   ...(typeNorm    ? { "Type":     { select: { name: typeNorm } } } : {}),
-  ...(cycleNorm   ? { "Cycle":    { select: { name: cycleNorm } } } : {})
+  ...(cycleNorm   ? { "Cycle":    { select: { name: cycleNorm } } } : {}),
+  "Last Sync": {
+    date: { start: nowISO(), time_zone: "Europe/Berlin" }
+  },
+    "Description": {
+      rich_text: toRichTextArray(issue.description || "")
+    }
   };
 
   // If you also keep a separate Text property named "Title", populate it too (optional, safe if property exists & is rich_text)
@@ -338,6 +362,13 @@ async function upsert(issue) {
   // Append tiny summary comment
   await appendSyncComment(pageId, issue, cycleVal);
 
+  // Optional: ensure 'Last Sync' always reflects the final write time
+  await notionWrite(`https://api.notion.com/v1/pages/${pageId}`, "PATCH", {
+    properties: {
+      "Last Sync": { date: { start: nowISO(), time_zone: "Europe/Berlin" } }
+    }
+  });
+  
   return { action, pageId };
 }
 
