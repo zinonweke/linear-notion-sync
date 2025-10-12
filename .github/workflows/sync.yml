@@ -1,7 +1,7 @@
 name: Sync Linear to Notion
 on:
   schedule:
-    - cron: "*/30 * * * *"   # runs every 10 minutes (UTC)
+    - cron: "*/30 * * * *"   # runs every 30 minutes (UTC)
   workflow_dispatch:         # allow manual trigger from the Actions tab
 
 jobs:
