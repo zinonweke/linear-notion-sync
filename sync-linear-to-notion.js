@@ -54,6 +54,23 @@ function nowISO() {
   return new Date().toISOString();
 }
 
+// Return "YYYY-MM-DDTHH:mm:ss" for Europe/Berlin (Oslo) — no Z or offset
+function nowInTimeZoneLocalISO(tz = "Europe/Berlin") {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: tz,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false
+  })
+  .formatToParts(new Date())
+  .reduce((acc, p) => (acc[p.type] = p.value, acc), {});
+  return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}`;
+}
+
 if (!LINEAR_API_KEY || !NOTION_TOKEN || !NOTION_DATABASE_ID) {
   console.error("Missing env vars: LINEAR_API_KEY, NOTION_TOKEN, NOTION_DATABASE_ID are required.");
   process.exit(1);
@@ -325,9 +342,9 @@ async function upsert(issue) {
   ...(typeNorm    ? { "Type":     { select: { name: typeNorm } } } : {}),
   ...(cycleNorm   ? { "Cycle":    { select: { name: cycleNorm } } } : {}),
   "Last Sync": {
-    date: { start: nowISO(), time_zone: "Europe/Berlin" }
+  date: { start: nowInTimeZoneLocalISO("Europe/Berlin"), time_zone: "Europe/Berlin" }
   },
-    "Description": {
+  "Description": {
       rich_text: toRichTextArray(issue.description || "")
     }
   };
@@ -365,7 +382,7 @@ async function upsert(issue) {
   // Optional: ensure 'Last Sync' always reflects the final write time
   await notionWrite(`https://api.notion.com/v1/pages/${pageId}`, "PATCH", {
     properties: {
-      "Last Sync": { date: { start: nowISO(), time_zone: "Europe/Berlin" } }
+      "Last Sync": { date: { start: nowInTimeZoneLocalISO("Europe/Berlin"), time_zone: "Europe/Berlin" } }
     }
   });
   
