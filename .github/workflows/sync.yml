@@ -1,7 +1,7 @@
 name: Sync Linear to Notion
 on:
   schedule:
-    - cron: "*/30 * * * *"   # runs every 30 minutes (UTC)
+    - cron: "*/60 * * * *"   # runs every 60 minutes (UTC)
   workflow_dispatch:         # allow manual trigger from the Actions tab
 
 jobs:
@@ -19,5 +19,5 @@ jobs:
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
-          LOOKBACK_MINUTES: 17280
+          LOOKBACK_MINUTES: 120
           REQUIRED_LABEL: Customer - Hapag Lloyd
