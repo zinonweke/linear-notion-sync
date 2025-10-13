@@ -7,7 +7,7 @@ const {
   LINEAR_API_KEY,
   NOTION_TOKEN,
   NOTION_DATABASE_ID,
-  LOOKBACK_MINUTES = "1200", // a bit bigger than schedule to avoid gaps
+  LOOKBACK_MINUTES = "120", // a bit bigger than schedule to avoid gaps
   REQUIRED_LABEL = "Customer - Hapag Lloyd"
 } = process.env;
 
