@@ -7,7 +7,7 @@ const {
   LINEAR_API_KEY,
   NOTION_TOKEN,
   NOTION_DATABASE_ID,
-  LOOKBACK_MINUTES = "17280", // a bit bigger than schedule to avoid gaps
+  LOOKBACK_MINUTES = "1200", // a bit bigger than schedule to avoid gaps
   REQUIRED_LABEL = "Customer - Hapag Lloyd"
 } = process.env;
 
@@ -35,6 +35,19 @@ function mapPriorityToText(p) {
     return map[p] ?? String(p);
   }
   return null;
+}
+
+// Map specific Linear states to Notion Status
+function mapLinearStatusToNotion(linearStatus) {
+  if (!linearStatus) return null;
+
+  // Convert "Code review" (Linear) → "Testing" (Notion)
+  if (linearStatus.toLowerCase() === "code review") {
+    return "Testing";
+  }
+
+  // Default: pass through
+  return linearStatus;
 }
 
 // Split long strings into Notion-safe rich_text chunks
@@ -312,7 +325,7 @@ async function upsert(issue) {
 
 
   // === ADD: normalize everything going into Selects
-  const statusName  = normalizeOptionName(issue.state?.name);
+  const statusName  = normalizeOptionName(mapLinearStatusToNotion(issue.state?.name));
   const priorityVal = normalizeOptionName(mapPriorityToText(issue.priority)); // handles number or text
   const moduleNorm  = normalizeOptionName(moduleVal);
   const subareaNorm = normalizeOptionName(subareaVal);
