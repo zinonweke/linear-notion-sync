@@ -41,9 +41,9 @@ function mapPriorityToText(p) {
 function mapLinearStatusToNotion(linearStatus) {
   if (!linearStatus) return null;
 
-  // Convert "Code review" (Linear) → "Testing" (Notion)
+  // Convert "Code review" (Linear) → "In Progress" (Notion)
   if (linearStatus.toLowerCase() === "code review") {
-    return "Testing";
+    return "In Progress";
   }
 
   // Default: pass through
